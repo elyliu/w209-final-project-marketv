@@ -1,0 +1,45 @@
+div {
+  padding: 10px;
+}
+
+text {
+  fill: #412F57;
+  font: 10px sans-serif;
+
+}
+body {
+	color: #412F57;
+	background-color: #F0FBFA;
+	font-family: "Trebuchet MS", Helvetica, sans-serif;
+}
+p {
+  fill: #412F57;
+  font: 12px;
+
+}
+
+ul {
+    list-style-type: none;
+    margin: 0;
+    padding: 0;
+    overflow: hidden;
+    background-color: #F0FBFA;
+}
+
+li {
+    float: left;
+}
+
+li a {
+    display: block;
+    color: #412F57;
+    text-align: center;
+    padding: 14px 16px;
+    text-decoration: none;
+}
+
+/* Change the link color to #111 (black) on hover */
+li a:hover {
+    background-color: #FFFFFF;
+    color: #412F57;
+}
