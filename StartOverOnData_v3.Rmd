@@ -1,0 +1,295 @@
+---
+title: "Reformat main data"
+author: "Collin Reinking"
+date: "August 4, 2018"
+output: html_document
+---
+
+```{r}
+library(tidyverse)
+library(rio)
+library(here)
+library(janitor)
+library(data.table)
+```
+
+I want to create a data.frame of the original names and what I will be changing them to so that I can change them back when I output.  This way I don't have to change any names in Tableau.
+```{r create data.frame of name changes}
+df.raw.head <- import(here('W209 Data - 20180725.csv'), nrows = 10)
+lookup_names <- data.frame(t_names = names(df.raw.head), r_names = names(df.raw.head %>% clean_names('upper_camel')), stringsAsFactors = FALSE)
+remove(df.raw.head)
+lookup_names
+```
+
+```{r}
+df.raw <- import(here('W209 Data - 20180725.csv')) %>% 
+  clean_names('upper_camel') %>% 
+  print()
+```
+
+```{r}
+lookup_program_title <- import(here('program_title_mapping_updated.csv')) %>% 
+  rename(ProgramName = program_name,
+         ProgramTitle = fake_title) %>% 
+  select(ProgramName,ProgramTitle) %>% 
+  print()
+```
+```{r}
+df.raw %>% 
+  anti_join(lookup_program_title, by='ProgramName') %>% 
+  distinct(ProgramName) %>% 
+  #export("ProgramsWithNoReplacementName.csv")
+  print()
+  
+```
+
+```{r}
+df.uncorrected <- df.raw %>% 
+  inner_join(lookup_program_title, by='ProgramName') %>% 
+  select(-ProgramName) %>% 
+  select(-CountySize) %>%
+  select(-ProgramType) %>% 
+  select(-DetailProgramType) %>%
+  select(-GeographicTerritory) %>% 
+  select(-Network) %>% 
+  select(-NetworkType) %>% 
+  
+  mutate(Education = str_extract(Education, ".+?(?= \\()")) %>% #only keep characters up until first occurance of " ("
+  mutate(ViewDate = as.Date(ViewDate,'%Y-%m-%d'),
+         BroadcastDate = as.Date(BroadcastDate, '%Y-%m-%d')
+  ) %>% 
+  filter(ViewDate >= BroadcastDate) %>% 
+  print()
+```
+
+```{r}
+str(df.uncorrected)
+```
+
+```{r}
+df <- df.uncorrected %>% 
+  group_by(Id,Gender, Age, HouseholdIncome, Education,Occupation,
+           ProgramTitle, EpisodeName, BroadcastDate,ProgramDuration) %>% 
+  summarize(ViewingMins = sum(ViewingMins),
+         ViewDate = max(ViewDate)) %>% 
+  mutate(Delaydays = as.integer(ViewDate - BroadcastDate)) %>% 
+  ungroup() %>% 
+  print()
+```
+
+```{r}
+id_lists <- df %>% 
+  select(ProgramTitle, Id) %>% 
+  group_by(ProgramTitle) %>% 
+  summarize(AllProgramIds = list(unique(Id)), NId = n_distinct(Id)) %>%
+  arrange(-NId) %>%
+  mutate(CumulativePercentile = cumsum(NId)/sum(NId)) %>% 
+  print()
+```
+
+
+```{r}
+id_lists %>% 
+  mutate(Rank = row_number()) %>% 
+  ggplot(aes(x=Rank, y=CumulativePercentile,color = CumulativePercentile<.9)) +
+  geom_point()
+
+
+id_lists %>% 
+  filter(CumulativePercentile>=.8)
+```
+
+```{r}
+df.reduced <- df %>%
+  semi_join(id_lists %>% filter(CumulativePercentile<=.8),
+            by = "ProgramTitle") %>% 
+  mutate(ViewingMins = if_else(ViewingMins>ProgramDuration, ProgramDuration,ViewingMins)) %>% 
+  print()
+  
+  
+  
+```
+
+
+```{r}
+investigate <- df.reduced %>% 
+  group_by(ProgramTitle, EpisodeName, Id, BroadcastDate, ViewDate) %>% 
+  mutate(n = n()) %>% 
+  ungroup() %>% 
+  filter(n>1)
+```
+
+```{r}
+investigate %>% 
+  arrange(-n,Id, ProgramTitle, EpisodeName, BroadcastDate, ViewDate) %>% 
+  select(Id, everything()) %>% 
+  #export(here("wtfIsGoingOnHere.csv"))
+  print()
+```
+
+I will correct the issue of mutltiple durations of the same program,episode, view, BroadcastDate, by selecting only the one with the highest duration and summing the max viewed minutes
+```{r}
+investigate %>% 
+  group_by_at(vars(-c(ViewingMins,ProgramDuration))) %>% 
+  summarize(ProgramDuration = max(ProgramDuration),
+            ViewingMins = max(ViewingMins))
+```
+
+df.reduced : 4,936,030 rows
+investigate : 77,773 rows 
+indestigate reduced: 38,073
+reduced by: 39,700
+
+
+```{r}
+df.reduced.corrected <- df.reduced  %>% 
+  group_by_at(vars(-c(ViewingMins,ProgramDuration))) %>% 
+  summarize(ProgramDuration = max(ProgramDuration),
+            ViewingMins = max(ViewingMins)) %>% 
+  ungroup() %>% 
+  print()
+```
+
+```{r}
+df.reduced.corrected %>% 
+  skimr::skim()
+```
+
+
+```{r}
+bin = case_when(Age <= 20 ~ '20',
+                Age <= 23 ~ '23',
+                Age <= 26 ~ '26',
+                Age <= 29 ~ '29',
+                Age <= 32 ~ '32',
+                Age <= 35 ~ '35',
+                Age <= 38 ~ '38',
+                Age <= 41 ~ '41',
+                Age <= 44 ~ '44',
+                Age <= 47 ~ '47',
+                Age <= 50 ~ '50')
+```
+
+
+
+```{r}
+rename_fun <- function(dat){
+  old_names <- data.frame(r_names = names(dat), stringsAsFactors = FALSE)
+  
+  new_names <- old_names %>% 
+    left_join(lookup_names, by = 'r_names' ) %>% 
+    mutate(final_names = coalesce(t_names, r_names)) %>% 
+    pull(final_names)
+  
+  
+  stats::setNames(dat, new_names)
+}
+
+
+
+df.final <- df.reduced.corrected %>% 
+  #filter(as.Date(ViewDate,'%m/%d/%Y') >= as.Date(BroadcastDate, '%m/%d/%Y') ) %>% 
+  
+  mutate(FemaleId = if_else(Gender == "F", Id, 'MALE'))%>% 
+  mutate(MaleId = if_else(Gender == "M", Id, 'FEMALE'))%>% 
+  mutate(bin = case_when(Age <= 20 ~ '20',
+                Age <= 23 ~ '23',
+                Age <= 26 ~ '26',
+                Age <= 29 ~ '29',
+                Age <= 32 ~ '32',
+                Age <= 35 ~ '35',
+                Age <= 38 ~ '38',
+                Age <= 41 ~ '41',
+                Age <= 44 ~ '44',
+                Age <= 47 ~ '47',
+                Age <= 50 ~ '50')) %>% 
+  group_by(ProgramTitle,bin) %>% 
+  mutate(pb_n_females = n_distinct(FemaleId)-1,
+         pb_n_males = n_distinct(MaleId)-1) %>% 
+  ungroup() %>% 
+  group_by(ProgramTitle) %>%
+  mutate(p_max_b_n_female = max(pb_n_females),
+         p_max_b_n_male = max(pb_n_males)) %>% 
+  mutate(GenderMaxLine = max(p_max_b_n_female, p_max_b_n_male)) %>% 
+  ungroup() %>% 
+  mutate(`Perc Viewed` = ViewingMins/ProgramDuration) %>% 
+  rename_fun() %>% 
+  print()
+  
+```
+```{r}
+export(df.final %>% 
+         select(-bin) %>% 
+         select(-pb_n_females) %>%  
+         select(-pb_n_males) %>%  
+         select(-p_max_b_n_female) %>%  
+         select(-p_max_b_n_male),
+       'CorrectedDataSet_2018_08_05.csv')
+```
+
+
+
+# Create Also Viewed Table
+
+```{r create a list of unique user IDs for each program}
+id_lists <- df.reduced.corrected %>% 
+  select(ProgramTitle, Id) %>% 
+  group_by(ProgramTitle) %>% 
+  summarize(AllProgramIds = list(unique(Id)), NId = n_distinct(Id)) %>%
+  arrange(-NId) %>% 
+  print()
+
+```
+
+
+```{r count the number of shared IDs between each pair of programs}
+n <- dim(id_lists)[1]**2
+dt <- data.table(pa=rep(NA,n), pb=rep(NA,n), shared_id_count=rep(-1,n) ) #the -2 is for validation later
+dt.mat <- as.matrix(dt)
+
+#this is going to take a while
+#doing this with a loop is lame but...
+i <- 0
+for(row_a in 1:nrow(id_lists)){
+  for(row_b in 1:nrow(id_lists)){
+    i <- i+1
+    dt.mat[[i,'pa']] = id_lists[[row_a, "ProgramTitle"]]
+    dt.mat[i,'pb'] = id_lists[[row_b, "ProgramTitle"]]
+    dt.mat[[i,'shared_id_count']] = length(
+      intersect(
+        id_lists[[row_a,'AllProgramIds']],
+        id_lists[[row_b,'AllProgramIds']]
+      )
+    )
+  }
+}
+```
+
+
+```{r convert to data.frame}
+shared_viewer_counts <- as.data.frame(dt.mat, stringsAsFactors = FALSE) %>% 
+  mutate(shared_id_count = as.integer(shared_id_count))
+```
+
+```{r remove irrelevant row}
+shared_viewer_counts <- shared_viewer_counts %>% 
+  filter(shared_id_count>0) %>% 
+  print()
+```
+
+```{r rename columns and export}
+shared_viewer_counts %>% 
+  arrange(-shared_id_count) %>% 
+  filter(pa != pb) %>% 
+  rename(`Program Title` = pa,
+         `Viewers Also Watched` = pb,
+         `Number of Viewers` = shared_id_count) %>% 
+  mutate(sort_order = row_number()) %>% 
+  export(here('shared_viewer_counts.csv'))
+```
+
+```{r}
+df.reduced.corrected %>% 
+  count(Id)
+```
+
